@@ -8,9 +8,9 @@ from .db import get_connection, init_db
 import logging
 
 # JWT Configuration
-JWT_SECRET_KEY = "your-secret-key-change-in-production"  # En producción usar variable de entorno
+JWT_SECRET_KEY = "B4nk3c_$3cur3_JWT_K3y_2025!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`1234567890abcdefABCDEF"  # En producción usar variable de entorno
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+JWT_EXPIRATION_HOURS = 5/60  # 5 minutos para mayor seguridad bancaria
 
 # Define a simple in-memory token store (ya no será necesario con JWT)
 tokens = {}
