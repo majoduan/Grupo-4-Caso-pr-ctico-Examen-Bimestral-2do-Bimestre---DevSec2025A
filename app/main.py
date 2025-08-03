@@ -1,18 +1,12 @@
 import secrets
-import jwt
-import datetime
+import re
 from flask import Flask, request, g
 from flask_restx import Api, Resource, fields # type: ignore
 from functools import wraps
 from .db import get_connection, init_db
 import logging
 
-# JWT Configuration
-JWT_SECRET_KEY = "B4nk3c_$3cur3_JWT_K3y_2025!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`1234567890abcdefABCDEF"  # En producción usar variable de entorno
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 5/60  # 5 minutos para mayor seguridad bancaria
-
-# Define a simple in-memory token store (ya no será necesario con JWT)
+# Define a simple in-memory token store
 tokens = {}
 
 #log = logging.getLogger(__name__)
@@ -25,30 +19,6 @@ logging.basicConfig(
      style="{",
      datefmt="%Y-%m-%d %H:%M",
 )
-
-# JWT Helper Functions
-def generate_jwt_token(user_data):
-    """Genera un token JWT con la información del usuario"""
-    payload = {
-        'user_id': user_data['id'],
-        'username': user_data['username'],
-        'role': user_data['role'],
-        'full_name': user_data['full_name'],
-        'email': user_data['email'],
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=JWT_EXPIRATION_HOURS),
-        'iat': datetime.datetime.utcnow()
-    }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-def decode_jwt_token(token):
-    """Decodifica y valida un token JWT"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        return None  # Token expirado
-    except jwt.InvalidTokenError:
-        return None  # Token inválido
 
 # Configure Swagger security scheme for Bearer tokens
 authorizations = {
@@ -110,118 +80,113 @@ class Login(Resource):
     @auth_ns.expect(login_model, validate=True)
     @auth_ns.doc('login')
     def post(self):
-        """Inicia sesión y devuelve un token JWT de autenticación."""
+        """Inicia sesión y devuelve un token de autenticación."""
         data = api.payload
         username = data.get("username")
         password = data.get("password")
+        otp = data.get("otp")  
         
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, username, password, role, full_name, email FROM bank.users WHERE username = %s", (username,))
+        cur.execute("SELECT id, username, password, role, full_name, email, otp FROM bank.users WHERE username = %s", (username,))
         user = cur.fetchone()
+        if user:
+            if user[3] == 'cajero':
+                # Un cajero requiere OTP
+                if not otp or otp != user[6]:
+                    cur.close()
+                    conn.close()
+                    api.abort(401, "OTP required or invalid for cashier")
+            if user[2] == password:
+                token = secrets.token_hex(16)
+                cur.execute("INSERT INTO bank.tokens (token, user_id) VALUES (%s, %s)", (token, user[0]))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"message": "Login successful", "token": token}, 200
         cur.close()
         conn.close()
-        
-        if user and user[2] == password:
-            # Crear datos del usuario para el JWT
-            user_data = {
-                'id': user[0],
-                'username': user[1],
-                'role': user[3],
-                'full_name': user[4],
-                'email': user[5]
-            }
-            
-            # Generar token JWT
-            token = generate_jwt_token(user_data)
-            
-            return {
-                "message": "Login successful", 
-                "token": token,
-                "user": {
-                    "id": user_data['id'],
-                    "username": user_data['username'],
-                    "role": user_data['role'],
-                    "full_name": user_data['full_name']
-                }
-            }, 200
-        else:
-            api.abort(401, "Invalid credentials")
+        api.abort(401, "Invalid credentials")
 
 @auth_ns.route('/logout')
 class Logout(Resource):
     @auth_ns.doc('logout')
     def post(self):
-        """
-        Invalida el token JWT (con JWT stateless, esto es informativo).
-        En una implementación completa podrías mantener una blacklist de tokens.
-        """
+        """Invalida el token de autenticación."""
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             api.abort(401, "Authorization header missing or invalid")
-        
         token = auth_header.split(" ")[1]
-        
-        # Validar que el token sea válido antes de "invalidarlo"
-        payload = decode_jwt_token(token)
-        if not payload:
-            api.abort(401, "Invalid or expired token")
-        
-        # Con JWT, el logout es principalmente del lado del cliente
-        # Opcionalmente podrías agregar el token a una blacklist en la base de datos
-        return {"message": "Logout successful"}, 200
-
-@auth_ns.route('/me')
-class UserProfile(Resource):
-    @auth_ns.doc('get_user_profile')
-    def get(self):
-        """Obtiene la información del usuario autenticado usando JWT."""
-        # Verificación manual de JWT para este endpoint hasta reorganizar
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            api.abort(401, "Authorization header missing or invalid")
-        
-        token = auth_header.split(" ")[1]
-        payload = decode_jwt_token(token)
-        if not payload:
-            api.abort(401, "Invalid or expired JWT token")
-            
         conn = get_connection()
         cur = conn.cursor()
-        
-        # Obtener información completa del usuario y su cuenta
-        cur.execute("""
-            SELECT u.id, u.username, u.role, u.full_name, u.email,
-                   a.balance, cc.balance as credit_debt, cc.limit_credit
-            FROM bank.users u
-            LEFT JOIN bank.accounts a ON u.id = a.user_id
-            LEFT JOIN bank.credit_cards cc ON u.id = cc.user_id
-            WHERE u.id = %s
-        """, (payload['user_id'],))
-        
-        user_data = cur.fetchone()
+        cur.execute("DELETE FROM bank.tokens WHERE token = %s", (token,))
+        if cur.rowcount == 0:
+            conn.commit()
+            cur.close()
+            conn.close()
+            api.abort(401, "Invalid token")
+        conn.commit()
         cur.close()
         conn.close()
-        
-        if not user_data:
-            api.abort(404, "User not found")
-        
-        return {
-            "user": {
-                "id": user_data[0],
-                "username": user_data[1],
-                "role": user_data[2],
-                "full_name": user_data[3],
-                "email": user_data[4]
-            },
-            "account": {
-                "balance": float(user_data[5]) if user_data[5] else 0,
-                "credit_debt": float(user_data[6]) if user_data[6] else 0,
-                "credit_limit": float(user_data[7]) if user_data[7] else 0
-            }
-        }, 200
+        return {"message": "Logout successful"}, 200
 
-# ---------------- JWT Token-Required Decorator ----------------
+# Registrar cajero
+register_cashier_model = auth_ns.model('RegisterCashier', {
+    'username': fields.String(required=True, description='Usuario (letras y números)', example='cajero123'),
+    'password': fields.String(required=True, description='Contraseña (mínimo 10 caracteres, letras, números y símbolos)', example='Cajero$2025!'),
+    'otp': fields.String(required=True, description='OTP para el cajero', example='123456')
+})
+
+# estringe el acceso solo a usuarios con rol 'cajero'
+def cashier_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if g.user.get('role') != 'cajero':
+            api.abort(403, "Only cashiers can perform this operation")
+        return f(*args, **kwargs)
+    return decorated
+
+# Endpoint para registrar cajero
+@auth_ns.route('/register-cashier')
+class RegisterCashier(Resource):
+    @auth_ns.expect(register_cashier_model, validate=True)
+    @auth_ns.doc('register_cashier')
+    def post(self):
+        """Registra un nuevo cajero (solo username, password y OTP)."""
+        data = api.payload
+        username = data.get("username")
+        password = data.get("password")
+        otp = data.get("otp")
+
+        # Validar username: letras y números
+        if not re.match(r'^(?=.*[a-zA-Z])(?=.*\d)[a-zA-Z\d]+$', username):
+            api.abort(400, "Username must contain both letters and numbers")
+        # Validar password: mínimo 10 caracteres, letras, números y símbolos
+        if not re.match(r'^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z\d]).{10,}$', password):
+            api.abort(400, "Password must be at least 10 characters and include letters, numbers, and symbols")
+        # Validar OTP: solo números, 6 dígitos
+        if not re.match(r'^\d{6}$', otp):
+            api.abort(400, "OTP must be a 6-digit number")
+
+        conn = get_connection()
+        cur = conn.cursor()
+        # Verificar que el usuario no exista
+        cur.execute("SELECT id FROM bank.users WHERE username = %s", (username,))
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            api.abort(400, "Username already exists")
+        # Insertar cajero
+        cur.execute(
+            "INSERT INTO bank.users (username, password, role, otp) VALUES (%s, %s, %s, %s)",
+            (username, password, 'cajero', otp)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"message": "Cashier registered successfully"}, 201
+
+# ---------------- Token-Required Decorator ----------------
 
 def token_required(f):
     @wraps(f)
@@ -229,25 +194,29 @@ def token_required(f):
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             api.abort(401, "Authorization header missing or invalid")
-        
         token = auth_header.split(" ")[1]
-        logging.debug("JWT Token received: " + str(token[:20]) + "...")
-        
-        # Decodificar y validar el token JWT
-        payload = decode_jwt_token(token)
-        if not payload:
-            api.abort(401, "Invalid or expired JWT token")
-        
-        # Establecer la información del usuario en el contexto global
+        logging.debug("Token: "+str(token))
+        conn = get_connection()
+        cur = conn.cursor()
+        # Query the token in the database and join with users table to retrieve user info
+        cur.execute("""
+            SELECT u.id, u.username, u.role, u.full_name, u.email 
+            FROM bank.tokens t
+            JOIN bank.users u ON t.user_id = u.id
+            WHERE t.token = %s
+        """, (token,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not user:
+            api.abort(401, "Invalid or expired token")
         g.user = {
-            "id": payload['user_id'],
-            "username": payload['username'],
-            "role": payload['role'],
-            "full_name": payload['full_name'],
-            "email": payload['email']
+            "id": user[0],
+            "username": user[1],
+            "role": user[2],
+            "full_name": user[3],
+            "email": user[4]
         }
-        
-        logging.debug(f"JWT Token validated for user: {g.user['username']}")
         return f(*args, **kwargs)
     return decorated
 
@@ -255,15 +224,16 @@ def token_required(f):
 
 @bank_ns.route('/deposit')
 class Deposit(Resource):
+    logging.debug("Entering....")
     @bank_ns.expect(deposit_model, validate=True)
     @bank_ns.doc('deposit')
     @token_required
+    @cashier_required
     def post(self):
         """
         Realiza un depósito en la cuenta especificada.
         Se requiere el número de cuenta y el monto a depositar.
         """
-        logging.debug("Entering deposit endpoint....")
         data = api.payload
         account_number = data.get("account_number")
         amount = data.get("amount", 0)
@@ -295,6 +265,7 @@ class Withdraw(Resource):
     @bank_ns.expect(withdraw_model, validate=True)
     @bank_ns.doc('withdraw')
     @token_required
+    @cashier_required
     def post(self):
         """Realiza un retiro de la cuenta del usuario autenticado."""
         data = api.payload
@@ -483,10 +454,28 @@ class PayCreditBalance(Resource):
             "credit_card_debt": new_credit_debt
         }, 200
 
+@bank_ns.route('/accounts')
+class Accounts(Resource):
+    @bank_ns.doc('get_accounts')
+    @token_required
+    def get(self):
+        """Obtiene las cuentas del usuario autenticado con su saldo y número de cuenta."""
+        user_id = g.user['id']
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, balance FROM bank.accounts WHERE user_id = %s", (user_id,))
+        accounts = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = [{"account_number": acc[0], "balance": float(acc[1])} for acc in accounts]
+        return {"accounts": result}, 200
+
 @app.before_first_request
 def initialize_db():
     init_db()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
