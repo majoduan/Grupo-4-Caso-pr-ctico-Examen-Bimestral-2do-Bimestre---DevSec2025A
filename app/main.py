@@ -5,7 +5,7 @@ from flask import Flask, request, g
 from flask_restx import Api, Resource, fields # type: ignore
 from functools import wraps
 from .db import get_connection, init_db
-import logging
+from .logger import logger, log_request, log_auth_attempt
 
 # JWT Configuration
 JWT_SECRET_KEY = "B4nk3c_$3cur3_JWT_K3y_2025!@#$%^&*()_+{}[]|\\:;\"'<>,.?/~`1234567890abcdefABCDEF"  # En producción usar variable de entorno
@@ -14,17 +14,6 @@ JWT_EXPIRATION_HOURS = 5/60  # 5 minutos para mayor seguridad bancaria
 
 # Define a simple in-memory token store (ya no será necesario con JWT)
 tokens = {}
-
-#log = logging.getLogger(__name__)
-logging.basicConfig(
-     filename="app.log",
-     level=logging.DEBUG,
-     encoding="utf-8",
-     filemode="a",
-     format="{asctime} - {levelname} - {message}",
-     style="{",
-     datefmt="%Y-%m-%d %H:%M",
-)
 
 # JWT Helper Functions
 def generate_jwt_token(user_data):
@@ -135,6 +124,9 @@ class Login(Resource):
             # Generar token JWT
             token = generate_jwt_token(user_data)
             
+            # Registrar login exitoso
+            log_auth_attempt(username, True, 200)
+            
             return {
                 "message": "Login successful", 
                 "token": token,
@@ -146,11 +138,14 @@ class Login(Resource):
                 }
             }, 200
         else:
+            # Registrar intento de login fallido
+            log_auth_attempt(username, False, 401)
             api.abort(401, "Invalid credentials")
 
 @auth_ns.route('/logout')
 class Logout(Resource):
     @auth_ns.doc('logout')
+    @log_request('INFO')
     def post(self):
         """
         Invalida el token JWT (con JWT stateless, esto es informativo).
@@ -174,6 +169,7 @@ class Logout(Resource):
 @auth_ns.route('/me')
 class UserProfile(Resource):
     @auth_ns.doc('get_user_profile')
+    @log_request('INFO')
     def get(self):
         """Obtiene la información del usuario autenticado usando JWT."""
         # Verificación manual de JWT para este endpoint hasta reorganizar
@@ -231,7 +227,7 @@ def token_required(f):
             api.abort(401, "Authorization header missing or invalid")
         
         token = auth_header.split(" ")[1]
-        logging.debug("JWT Token received: " + str(token[:20]) + "...")
+        logger.debug(f"JWT Token received: {token[:20]}...", 200)
         
         # Decodificar y validar el token JWT
         payload = decode_jwt_token(token)
@@ -247,7 +243,7 @@ def token_required(f):
             "email": payload['email']
         }
         
-        logging.debug(f"JWT Token validated for user: {g.user['username']}")
+        logger.debug(f"JWT Token validated for user: {g.user['username']}", 200)
         return f(*args, **kwargs)
     return decorated
 
@@ -263,7 +259,7 @@ class Deposit(Resource):
         Realiza un depósito en la cuenta especificada.
         Se requiere el número de cuenta y el monto a depositar.
         """
-        logging.debug("Entering deposit endpoint....")
+        logger.debug("Entering deposit endpoint", 200)
         data = api.payload
         account_number = data.get("account_number")
         amount = data.get("amount", 0)
@@ -288,6 +284,10 @@ class Deposit(Resource):
         conn.commit()
         cur.close()
         conn.close()
+        
+        # Log the successful deposit with amount details
+        logger.info(f"Depósito exitoso: ${amount:.2f} en cuenta {account_number}. Nuevo saldo: ${new_balance:.2f}", 200)
+        
         return {"message": "Deposit successful", "new_balance": new_balance}, 200
 
 @bank_ns.route('/withdraw')
@@ -320,6 +320,10 @@ class Withdraw(Resource):
         conn.commit()
         cur.close()
         conn.close()
+        
+        # Log the successful withdrawal with amount details
+        logger.info(f"Retiro exitoso: ${amount:.2f} de cuenta del usuario {g.user['username']}. Nuevo saldo: ${new_balance:.2f}", 200)
+        
         return {"message": "Withdrawal successful", "new_balance": new_balance}, 200
 
 @bank_ns.route('/transfer')
@@ -364,6 +368,10 @@ class Transfer(Resource):
             cur.execute("SELECT balance FROM bank.accounts WHERE user_id = %s", (g.user['id'],))
             new_balance = float(cur.fetchone()[0])
             conn.commit()
+            
+            # Log the successful transfer with amount details
+            logger.info(f"Transferencia exitosa: ${amount:.2f} de {g.user['username']} a {target_username}. Nuevo saldo: ${new_balance:.2f}", 200)
+            
         except Exception as e:
             conn.rollback()
             cur.close()
@@ -410,6 +418,10 @@ class CreditPayment(Resource):
             cur.execute("SELECT balance FROM bank.credit_cards WHERE user_id = %s", (user_id,))
             new_credit_balance = float(cur.fetchone()[0])
             conn.commit()
+            
+            # Log the successful credit purchase with amount details
+            logger.info(f"Compra a crédito exitosa: ${amount:.2f} para usuario {g.user['username']}. Saldo cuenta: ${new_account_balance:.2f}, Deuda tarjeta: ${new_credit_balance:.2f}", 200)
+            
         except Exception as e:
             conn.rollback()
             cur.close()
@@ -470,6 +482,10 @@ class PayCreditBalance(Resource):
             cur.execute("SELECT balance FROM bank.credit_cards WHERE user_id = %s", (user_id,))
             new_credit_debt = float(cur.fetchone()[0])
             conn.commit()
+            
+            # Log the successful credit payment with amount details
+            logger.info(f"Pago de tarjeta de crédito exitoso: ${payment:.2f} de usuario {g.user['username']}. Saldo cuenta: ${new_account_balance:.2f}, Nueva deuda: ${new_credit_debt:.2f}", 200)
+            
         except Exception as e:
             conn.rollback()
             cur.close()
@@ -482,6 +498,78 @@ class PayCreditBalance(Resource):
             "account_balance": new_account_balance,
             "credit_card_debt": new_credit_debt
         }, 200
+
+# ---------------- Admin Endpoints ----------------
+
+@auth_ns.route('/logs')
+class ViewLogs(Resource):
+    @auth_ns.doc('view_logs')
+    @token_required
+    @log_request('INFO')
+    def get(self):
+        """Consulta los logs del sistema (solo para administradores)."""
+        # Verificar que el usuario tenga rol de administrador
+        if g.user.get('role') != 'admin':
+            logger.warning("Intento de acceso no autorizado a logs", 403)
+            api.abort(403, "Access denied. Admin role required.")
+        
+        try:
+            # Parámetros de consulta opcionales
+            limit = request.args.get('limit', 50, type=int)
+            log_level = request.args.get('level', '')
+            username = request.args.get('username', '')
+            
+            conn = logger._get_logs_connection()
+            cursor = conn.cursor()
+            
+            # Construir consulta con filtros
+            query = "SELECT * FROM logs WHERE 1=1"
+            params = []
+            
+            if log_level:
+                query += " AND log_level = %s"
+                params.append(log_level)
+            
+            if username:
+                query += " AND username = %s"
+                params.append(username)
+            
+            query += " ORDER BY created_at DESC LIMIT %s"
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            logs = cursor.fetchall()
+            
+            # Formatear resultados
+            logs_list = []
+            for log in logs:
+                logs_list.append({
+                    'id': log[0],
+                    'timestamp_local': log[1],
+                    'log_level': log[2],
+                    'remote_ip': log[3],
+                    'username': log[4],
+                    'action_message': log[5],
+                    'http_response_code': log[6],
+                    'created_at': log[7].isoformat() if log[7] else None
+                })
+            
+            cursor.close()
+            conn.close()
+            
+            return {
+                'logs': logs_list,
+                'total_returned': len(logs_list),
+                'filters_applied': {
+                    'limit': limit,
+                    'log_level': log_level,
+                    'username': username
+                }
+            }, 200
+            
+        except Exception as e:
+            logger.error(f"Error consultando logs: {str(e)}", 500)
+            api.abort(500, f"Error retrieving logs: {str(e)}")
 
 @app.before_first_request
 def initialize_db():
