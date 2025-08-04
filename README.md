@@ -30,9 +30,9 @@ API bancaria desarrollada en Flask que implementa requerimientos como: Logging p
 
 3 usuarios predeterminados para probar:
 
-- `user1` / `pass1` (cliente, tiene $1000 en cuenta)
-- `user2` / `pass2` (cliente, tiene $1000 en cuenta)
-- `user3` / `pass3` (cajero, tiene $1000 en cuenta - **requiere OTP: 111111**)
+- `user1` / `password1` (cliente, tiene $1000 en cuenta)
+- `user2` / `password2` (cliente, tiene $1000 en cuenta)
+- `user3` / `password3` (cajero, tiene $1000 en cuenta - **requiere OTP: 111111**)
 
 ## Endpoints principales
 
