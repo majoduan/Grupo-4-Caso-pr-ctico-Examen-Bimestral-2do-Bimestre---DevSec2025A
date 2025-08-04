@@ -73,10 +73,10 @@ def init_db():
     count = cur.fetchone()[0]
     if count == 0:
         sample_users = [
-            ('user1', 'pass1', 'cliente', 'Usuario Uno', 'user1@example.com', None),
-            ('user2', 'pass2', 'cliente', 'Usuario Dos', 'user2@example.com', None),
-            ('user3', 'pass3', 'cajero', 'Usuario Tres', 'user3@example.com', '123456')
-        ]
+        ('user1', 'password1', 'cliente', 'Usuario Uno', 'user1@example.com', None),
+        ('user2', 'password2', 'cliente', 'Usuario Dos', 'user2@example.com', None),
+        ('user3', 'password3', 'cajero', 'Usuario Tres', 'user3@example.com', '123456')
+    ]
         for username, password, role, full_name, email, otp in sample_users:
             cur.execute("""
                 INSERT INTO bank.users (username, password, role, full_name, email, otp)

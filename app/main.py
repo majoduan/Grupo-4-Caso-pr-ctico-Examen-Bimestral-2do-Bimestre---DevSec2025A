@@ -743,8 +743,7 @@ class Accounts(Resource):
         result = [{"account_number": acc[0], "balance": float(acc[1])} for acc in accounts]
         return {"accounts": result}, 200
 
-@app.before_first_request
-def initialize_db():
+with app.app_context():
     init_db()
 
 if __name__ == "__main__":
